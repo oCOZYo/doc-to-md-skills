@@ -1,23 +1,22 @@
 ---
 name: pdf-to-md
-description: Convert PDF files (and JPG/PNG/BMP/TIFF/WEBP images) to structured Markdown. Auto-detects native-text PDFs (extracted instantly with pymupdf, zero API cost) versus scanned/image PDFs (routed through PaddleOCR). Embedded large images can optionally be described inline by Claude Vision. Use this skill whenever the user wants to convert a PDF to Markdown, extract text from scanned documents, OCR a batch of image files, or turn PDF reports into notes — even if they say "PDF → md", "extract this PDF", "OCR these scans", or similar.
+description: Convert PDF files to structured Markdown. Auto-detects native-text PDFs (extracted instantly with pymupdf, zero API cost) versus scanned/image PDFs (routed through PaddleOCR). Embedded large images are extracted to disk and referenced via standard Markdown image syntax — you (the agent) then describe them using your built-in Vision capability via the Read tool. No separate API key required. Use this skill whenever the user wants to convert a PDF to Markdown, extract text from PDFs, OCR scanned documents, or turn PDF reports into notes — even if they say "PDF → md", "extract this PDF", or "OCR these scans".
 ---
 
 # PDF → Markdown
+
+PDFs route by content type. The script does deterministic extraction; you (the agent) describe any embedded images using your built-in Vision capability.
 
 ## Routing
 
 | Input | Path | Notes |
 |-------|------|-------|
-| Native-text PDF (avg >50 chars/page) | `pdf_to_md.py` (pymupdf) | Seconds, no API cost |
-| Scanned / image PDF | `ocr_extract.py` (PaddleOCR) | Auto-skipped from fast path, falls through to OCR |
-| Image file (JPG / PNG / BMP / TIFF / WEBP) | `ocr_extract.py` | OCR only |
+| Native-text PDF (avg >50 chars/page) | `pdf_to_md.py` (pymupdf) | Seconds, zero API cost |
+| Scanned / image PDF | `ocr_extract.py` (PaddleOCR) | Auto-skipped from fast path; OCR vendor handles it |
 
-## Workflow
+## Workflow (agent mode — default, zero config)
 
-### Step 1 — Fast extract for text PDFs
-
-Run the fast extractor on every PDF. Native-text PDFs produce `.md` immediately; scanned PDFs print `scanned` and are skipped (handled in Step 2).
+### Step 1 — Run the extractor
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
@@ -25,19 +24,34 @@ python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
   --output <output_dir>
 ```
 
-Per-file status output:
-- `text (avg NNN ch/pg, N images)` — extracted, result at `<output_dir>/<stem>.md`
-- `scanned (avg N ch/pg)` — skipped, proceed to Step 2
+Per-file status:
+- `text (avg NNN ch/pg, N images)` — extracted, result at `<output_dir>/<stem>.md`, images at `<output_dir>/<stem>/imgs/`
+- `scanned (avg N ch/pg)` — skipped, route to Step 3
 
-Optional flags:
-- `--large-image-kb 30` — send embedded large images to Claude Vision (requires `ANTHROPIC_API_KEY`)
-- `--no-vision` — text-only mode, no API calls
-- `--max-images 50` — per-document image cap
-- `--model claude-haiku-4-5` — Vision model (Haiku is fast/cheap; use `claude-sonnet-4-6` for richer descriptions)
+### Step 2 — Fill in image descriptions
 
-If the input only contains images (no PDFs), skip this step and go straight to Step 2.
+Open the produced `.md`. Each embedded large image appears as a placeholder:
+```markdown
+![](report/imgs/p3_i007.png)
+```
 
-### Step 2 — OCR (scanned PDFs + image files)
+Replace each placeholder with a description block. **Pick one approach based on image count:**
+
+- **≤5 images total**: use your Read tool to view each image, then Edit the placeholder line to:
+  ```markdown
+  > **[image]**
+  >
+  > <your description: nodes/edges if a diagram, numbers/trends if a chart, table contents if a table>
+  ```
+
+- **>5 images, or multiple files at once**: spawn subagents via the Agent tool. Image bytes only enter the subagent's context, not yours. Suggested chunking: 10–20 images per subagent. Prompt each subagent:
+  > "For each image path in this list, Read the image and produce a Markdown description (flowchart → nodes & connections; chart → numbers & trends; table → Markdown table). Return a JSON array of `{path, description}` objects."
+  
+  Then apply the replacements to the `.md` files in your context.
+
+### Step 3 — OCR (scanned PDFs only)
+
+For PDFs that printed `scanned` in Step 1:
 
 ```bash
 export PADDLEOCR_TOKEN="your_token"
@@ -46,20 +60,37 @@ python "${CLAUDE_SKILL_DIR}/scripts/ocr_extract.py" \
   <source_dir> <output_dir>
 ```
 
-Output structure:
-- `per_page/` — one `.md` per page (cloud mode only, multi-page docs)
-- `merged/` — full-document `.md`, ready to drop into a knowledge base
+Get free PaddleOCR credentials at https://aistudio.baidu.com/paddleocr.
 
-Get PaddleOCR credentials at https://aistudio.baidu.com/paddleocr (free tier available).
+## Standalone mode (backend / cron)
+
+For headless automation outside Claude Code, pass `--api-key` to have the script call Vision itself:
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
+  --input docs/ --output out/ \
+  --api-key sk-ant-... --model claude-haiku-4-5
+```
+
+## Flags
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--large-image-kb` | `30` | Only extract/describe images larger than this (KB). 30 KB filters out logos/icons. |
+| `--max-images` | `50` | Per-document image cap (cost guard). |
+| `--no-images` | — | Skip image extraction entirely (text-only output). |
+| `--api-key` | — | Standalone mode (script calls Vision). Default is agent mode. |
+| `--model` | `claude-haiku-4-5` | Vision model when `--api-key` is set. |
 
 ## Requirements
 
-- Python 3.10+ with `pymupdf` (and `anthropic` if using Vision, `requests` for OCR)
-- `ANTHROPIC_API_KEY` — only when using `--large-image-kb` for inline image descriptions
-- `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL` — only for Step 2 (scanned PDFs and image files)
+- Python 3.10+ with `pymupdf`
+- For Step 3 (scanned PDFs): `requests` + `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL`
+- For `--api-key` standalone mode only: `pip install anthropic`
 
 ## Notes
 
 - Native-text PDFs cost nothing and finish in seconds — always run Step 1 first.
+- Image placeholders use standard Markdown syntax, so they render in Obsidian / GitHub / any viewer even before you describe them.
 - Keep `PADDLEOCR_TOKEN` in environment variables; never pass on the command line.
 - `ocr_extract.py` also supports a local MLX VLM server via `--server_url`; see `--help`.

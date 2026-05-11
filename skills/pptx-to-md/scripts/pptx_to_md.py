@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""Convert PPTX/PPSX to Markdown using Vision LLM per slide.
+"""Convert PPTX/PPSX to Markdown by rendering each slide as a PNG.
 
 Pipeline:
-  1. PPTX → PDF  (LibreOffice headless, reliable conversion)
-  2. PDF  → per-page PNG  (pymupdf, high-quality rendering at 150dpi)
-  3. PNG  → Markdown description  (Claude Vision, parallel)
-  4. All slide descriptions → single .md file
+  1. PPTX → PDF (LibreOffice headless)
+  2. PDF  → per-slide PNG (pymupdf, 150 dpi by default)
+  3. Write .md with one section per slide referencing each PNG via ![](...)
+
+The calling agent (Claude Code) describes each slide by reading the PNGs
+with the Read tool — no API key required. For large decks the agent can
+spawn subagents to keep image bytes out of the main context.
+
+For backend / non-interactive use, pass --api-key to have the script call
+Claude Vision itself and inline the descriptions.
 
 Usage:
-  python convert_pptx_to_md.py --input file.pptx --output ./out/
-  python convert_pptx_to_md.py --input slides_dir/ --output ./out/ --workers 4
-  python convert_pptx_to_md.py --input file.pptx --output ./out/ --dpi 200 --model claude-sonnet-4-6
+  # Agent mode (default, zero config):
+  python pptx_to_md.py --input file.pptx --output ./out/
+
+  # Standalone mode (script calls Vision directly, parallel):
+  python pptx_to_md.py --input file.pptx --output ./out/ --api-key sk-ant-...
 """
 import argparse
 import base64
-import os
 import subprocess
 import sys
 import tempfile
@@ -26,14 +33,17 @@ try:
 except ImportError:
     sys.exit("ERROR: pip install pymupdf")
 
-VISION_PROMPT = """这是一张PPT幻灯片的截图。请描述幻灯片的完整内容：
-- 标题和副标题（保留原文）
-- 正文内容（保留层级结构，转为 Markdown 列表）
-- 如果有流程图/架构图：描述各节点名称和连接关系（箭头方向、层级）
-- 如果有图表/数据：提取数值、坐标轴标签、趋势
-- 如果有对比布局（左右/上下）：分别描述各部分并说明对比关系
-- 如果有表格：完整输出为 Markdown 表格
-直接输出 Markdown，不要添加引导语。"""
+VISION_PROMPT = (
+    "This is a screenshot of a PPT slide. Describe the slide's full content:\n"
+    "- Title and subtitle (preserve original text)\n"
+    "- Body content (keep the hierarchy, render as Markdown lists)\n"
+    "- If there's a flowchart/architecture diagram: describe each node and "
+    "the connections (arrow direction, hierarchy)\n"
+    "- If there's a chart/data: extract values, axis labels, trends\n"
+    "- If there's a side-by-side layout: describe each part and the comparison\n"
+    "- If there's a table: output it as a complete Markdown table\n"
+    "Output Markdown directly, no preamble."
+)
 
 CONVERTIBLE = {".pptx", ".ppsx"}
 
@@ -42,7 +52,7 @@ def pptx_to_pdf(pptx_path: Path, pdf_dir: Path, worker_id: int = 0) -> Path | No
     """Convert PPTX to PDF via LibreOffice. Returns path to PDF or None on failure."""
     profile = f"/tmp/lo_profile_pptx2md_{worker_id}"
     try:
-        result = subprocess.run(
+        subprocess.run(
             [
                 "soffice", "--headless",
                 "--convert-to", "pdf",
@@ -109,13 +119,18 @@ def convert(
     pptx_path: Path,
     output_dir: Path,
     dpi: int,
-    model: str,
     max_slides: int,
-    concurrent: int,
     worker_id: int,
-    client,
-) -> Path:
+    standalone_client=None,
+    model: str = "claude-haiku-4-5",
+    concurrent: int = 5,
+) -> tuple[Path, int]:
+    """Returns (output_path, slide_count)."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    stem = pptx_path.stem
+
+    # Persistent slide directory — the agent will Read these
+    slides_dir = output_dir / stem / "slides"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -123,75 +138,82 @@ def convert(
         # Step 1: PPTX → PDF
         pdf = pptx_to_pdf(pptx_path, tmp_path, worker_id)
         if not pdf:
-            out = output_dir / (pptx_path.stem + ".md")
-            out.write_text(f"# {pptx_path.stem}\n\n*[PDF conversion failed]*\n")
-            return out
+            out = output_dir / (stem + ".md")
+            out.write_text(f"# {stem}\n\n*[PDF conversion failed]*\n")
+            return out, 0
 
-        # Step 2: PDF → per-slide PNGs
-        pngs = pdf_to_pngs(pdf, tmp_path / "pngs", dpi)
+        # Step 2: PDF → per-slide PNGs (rendered into persistent slides_dir)
+        slides_dir.mkdir(parents=True, exist_ok=True)
+        pngs = pdf_to_pngs(pdf, slides_dir, dpi)
         if not pngs:
-            out = output_dir / (pptx_path.stem + ".md")
-            out.write_text(f"# {pptx_path.stem}\n\n*[No slides rendered]*\n")
-            return out
+            out = output_dir / (stem + ".md")
+            out.write_text(f"# {stem}\n\n*[No slides rendered]*\n")
+            return out, 0
 
         pngs = pngs[:max_slides]
 
-        # Step 3: Vision per slide (parallel)
+    # Step 3: Either inline descriptions (standalone) or emit ![](...) placeholders (agent)
+    lines = [f"# {stem}\n"]
+
+    if standalone_client is not None:
+        # Standalone mode: parallel Vision calls
         results: dict[int, str] = {}
         with ThreadPoolExecutor(max_workers=concurrent) as pool:
             futures = {
-                pool.submit(describe_slide, png, i + 1, model, client): i + 1
+                pool.submit(describe_slide, png, i + 1, model, standalone_client): i + 1
                 for i, png in enumerate(pngs)
             }
             for future in as_completed(futures):
                 num, desc = future.result()
                 results[num] = desc
-
-        # Step 4: Assemble markdown
-        lines = [f"# {pptx_path.stem}\n"]
         for i in range(1, len(pngs) + 1):
             lines.append(f"\n## Slide {i}\n")
             lines.append(results.get(i, "*[missing]*"))
+    else:
+        # Agent mode: emit placeholders for the agent to fill in
+        for i, png in enumerate(pngs, 1):
+            lines.append(f"\n## Slide {i}\n")
+            lines.append(f"![]({stem}/slides/{png.name})\n")
 
-        out = output_dir / (pptx_path.stem + ".md")
-        out.write_text("\n".join(lines), encoding="utf-8")
-        return out
+    out = output_dir / (stem + ".md")
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out, len(pngs)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--input", required=True, help="PPTX/PPSX file or directory")
-    ap.add_argument("--output", required=True, help="Output directory for .md files")
-    ap.add_argument("--dpi", type=int, default=150, help="Slide render resolution (default: 150)")
+    ap.add_argument("--output", required=True, help="Output directory")
+    ap.add_argument("--dpi", type=int, default=150,
+                    help="Slide render resolution (default: 150)")
+    ap.add_argument("--max-slides", type=int, default=200,
+                    help="Max slides per file (cost guard, default: 200)")
     ap.add_argument(
-        "--model", default="claude-haiku-4-5-20251001",
-        help="Claude model for Vision calls"
+        "--api-key", default=None,
+        help="Anthropic API key. If provided, the script calls Vision itself "
+             "and inlines descriptions (standalone mode for backend / cron use). "
+             "Default: render PNGs and emit ![](...) placeholders for the "
+             "calling agent to fill in.",
     )
-    ap.add_argument(
-        "--max-slides", type=int, default=200,
-        help="Max slides per file (cost guard, default: 200)"
-    )
-    ap.add_argument(
-        "--concurrent", type=int, default=5,
-        help="Parallel Vision calls per file (default: 5)"
-    )
-    ap.add_argument(
-        "--workers", type=int, default=2,
-        help="Parallel files to process (default: 2)"
-    )
+    ap.add_argument("--model", default="claude-haiku-4-5",
+                    help="Vision model when --api-key is set")
+    ap.add_argument("--concurrent", type=int, default=5,
+                    help="Parallel Vision calls per file in standalone mode (default: 5)")
     args = ap.parse_args()
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("WARNING: ANTHROPIC_API_KEY not set")
-
-    try:
-        import anthropic
-        client = anthropic.Anthropic()
-    except ImportError:
-        sys.exit("ERROR: pip install anthropic")
 
     input_path = Path(args.input).resolve()
     output_dir = Path(args.output).resolve()
+
+    standalone_client = None
+    if args.api_key:
+        try:
+            import anthropic
+        except ImportError:
+            sys.exit("ERROR: --api-key requires `pip install anthropic`")
+        standalone_client = anthropic.Anthropic(api_key=args.api_key)
 
     files = (
         sorted(f for f in input_path.iterdir() if f.suffix.lower() in CONVERTIBLE)
@@ -203,29 +225,28 @@ def main():
         print("No PPTX/PPSX files found.")
         return
 
+    mode = "standalone" if standalone_client else "agent"
+    print(f"Mode: {mode}")
     print(f"Processing {len(files)} file(s) → {output_dir}")
 
-    from concurrent.futures import ProcessPoolExecutor
     total_slides = 0
-
-    # Process files (sequential if workers=1, else parallel)
     for i, pptx_path in enumerate(files):
         print(f"[{i+1}/{len(files)}] {pptx_path.name} ...", end=" ", flush=True)
-        out = convert(
+        _out, n = convert(
             pptx_path, output_dir,
             dpi=args.dpi,
-            model=args.model,
             max_slides=args.max_slides,
-            concurrent=args.concurrent,
             worker_id=i % 4,
-            client=client,
+            standalone_client=standalone_client,
+            model=args.model,
+            concurrent=args.concurrent,
         )
-        content = out.read_text(encoding="utf-8")
-        n = content.count("\n## Slide ")
         total_slides += n
         print(f"done ({n} slides)")
 
     print(f"\nTotal: {len(files)} files, {total_slides} slides → {output_dir}")
+    if mode == "agent" and total_slides > 0:
+        print("\nNext: ask Claude Code to fill in the ![](...) slide placeholders.")
 
 
 if __name__ == "__main__":
