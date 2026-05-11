@@ -1,43 +1,41 @@
 ---
 name: docx-to-md
-description: 将 DOCX/Word 文档批量转换为结构化 Markdown。直接提取标题、段落、表格（python-docx），并对大尺寸嵌入图片调用 Claude Vision 生成内联描述（按文档原顺序保留位置）。当用户提到"DOCX转Markdown"、"Word转笔记"、"提取Word内容"、"docx转md"、"Word文档转换"时，务必使用本 Skill。
-compatibility: 此 Skill 必须安装在 ~/.cc-switch/skills/docx-to-md/（脚本路径依赖此固定位置）。
+description: Convert DOCX/Word documents to structured Markdown. Extracts headings, paragraphs, and tables losslessly via python-docx, and optionally describes embedded large images inline using Claude Vision (preserving the image's original position in the document). Use this skill whenever the user wants to convert a Word document to Markdown, extract content from a .docx, or process Word reports into notes — even if they say "Word → md", "extract this docx", or "turn this report into Markdown".
 ---
 
 # DOCX → Markdown
 
-DOCX 是结构化 XML，文字可以直接无损提取，无需 OCR；但嵌入图片（架构图、流程图、截图）若占比较大，图文关系本身是信息——本 Skill 对超过阈值的图片调用 Claude Vision 生成文字描述，按原位置内联进 Markdown。
+DOCX is structured XML, so text/tables can be extracted losslessly without OCR. But embedded images (architecture diagrams, flowcharts, screenshots) carry information that text-only extractors silently drop. This skill describes those images inline with Claude Vision at their original position.
 
-## 工作流
+## Workflow
 
 ```bash
-export ANTHROPIC_API_KEY="..."
-~/.venvs/paddleocr/bin/python \
-  ~/.cc-switch/skills/docx-to-md/scripts/docx_to_md.py \
-  --input "<docx_or_dir>" \
-  --output "<output_dir>" \
+export ANTHROPIC_API_KEY="sk-ant-..."
+python "${CLAUDE_SKILL_DIR}/scripts/docx_to_md.py" \
+  --input <docx_or_dir> \
+  --output <output_dir> \
   --large-image-kb 30 \
-  --model claude-haiku-4-5-20251001
+  --model claude-haiku-4-5
 ```
 
-输出：`<output_dir>/<stem>.md`，包含按原顺序排列的标题、段落、表格，以及大图的 `> **[图片]**` 描述块。
+Output: `<output_dir>/<stem>.md` with headings, paragraphs, and tables in document order, plus `> **[image]**` description blocks for large embedded images.
 
-## 关键参数
+## Flags
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--large-image-kb` | 30 | 图片 blob 超过此值（KB）才送 Vision。30KB 默认能过滤掉徽标/图标 |
-| `--no-vision` | — | 纯文字模式，跳过所有图片，零 API 消耗 |
-| `--max-images` | 50 | 单文档图片数上限（费用保护） |
-| `--model` | `claude-haiku-4-5-20251001` | Haiku 快/便宜；用 `claude-sonnet-4-6` 获得更细的图片描述 |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--large-image-kb` | `30` | Only images larger than this (KB) are sent to Vision. 30 KB filters out logos/icons by default. |
+| `--no-vision` | — | Text-only mode, skip all images, zero API cost. |
+| `--max-images` | `50` | Per-document image cap (cost guard). |
+| `--model` | `claude-haiku-4-5` | Vision model. Haiku is fast/cheap; use `claude-sonnet-4-6` for richer descriptions. |
 
-## 环境
+## Requirements
 
-- `~/.venvs/paddleocr/bin/python`：含 `python-docx`、`anthropic`
-- `ANTHROPIC_API_KEY`：仅在使用 Vision 时需要（默认开启）
+- Python 3.10+ with `python-docx` and `anthropic`
+- `ANTHROPIC_API_KEY` — required when Vision is enabled (default)
 
-## 注意事项
+## Notes
 
-- 仅对原生 `.docx` 有效；遗留 `.doc` 需先用 LibreOffice 转换：
+- Works only on native `.docx`. Legacy `.doc` files need conversion first:
   `soffice --headless --convert-to docx file.doc`
-- 不处理 EMF/WMF 等矢量格式（python-docx 不直接暴露），主要识别 PNG/JPEG 嵌入图
+- Does not extract EMF/WMF vector images (not directly exposed by python-docx). Focuses on PNG/JPEG embeds, which is the common case.

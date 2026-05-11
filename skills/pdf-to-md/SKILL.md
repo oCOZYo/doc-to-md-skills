@@ -1,68 +1,65 @@
 ---
 name: pdf-to-md
-description: 将 PDF 文件批量转换为结构化 Markdown。自动识别原生文字 PDF（pymupdf 直接提取，秒级完成）和扫描/图像 PDF（PaddleOCR 云端识别）。也支持 JPG/PNG/BMP/TIFF/WEBP 图片文件。当用户提到"PDF转Markdown"、"扫描PDF"、"图像PDF"、"图片文档"、"OCR提取"、"处理一批PDF"、"文档转Markdown"、"文档转笔记"时，务必使用本 Skill。
-compatibility: 此 Skill 必须安装在 ~/.cc-switch/skills/pdf-to-md/（脚本路径依赖此固定位置）。
+description: Convert PDF files (and JPG/PNG/BMP/TIFF/WEBP images) to structured Markdown. Auto-detects native-text PDFs (extracted instantly with pymupdf, zero API cost) versus scanned/image PDFs (routed through PaddleOCR). Embedded large images can optionally be described inline by Claude Vision. Use this skill whenever the user wants to convert a PDF to Markdown, extract text from scanned documents, OCR a batch of image files, or turn PDF reports into notes — even if they say "PDF → md", "extract this PDF", "OCR these scans", or similar.
 ---
 
-# PDF / 图片 → Markdown
+# PDF → Markdown
 
-## 格式路由
+## Routing
 
-| 输入 | 路径 | 说明 |
-|------|------|------|
-| PDF（原生文字，平均 >50 字符/页） | `pdf_to_md.py` (pymupdf) | 秒级完成，无 API 消耗 |
-| PDF（扫描 / 图像） | `ocr_extract.py` (PaddleOCR 云端) | 自动识别后跳过快速路径 |
-| 图片（JPG / PNG / BMP / TIFF / WEBP） | `ocr_extract.py` | 仅 PaddleOCR 路径 |
+| Input | Path | Notes |
+|-------|------|-------|
+| Native-text PDF (avg >50 chars/page) | `pdf_to_md.py` (pymupdf) | Seconds, no API cost |
+| Scanned / image PDF | `ocr_extract.py` (PaddleOCR) | Auto-skipped from fast path, falls through to OCR |
+| Image file (JPG / PNG / BMP / TIFF / WEBP) | `ocr_extract.py` | OCR only |
 
-## 工作流
+## Workflow
 
-### Step 1：原生文字 PDF 快速提取
+### Step 1 — Fast extract for text PDFs
 
-先对所有 PDF 跑快速提取——原生文字 PDF 直接出结果，扫描 PDF 自动跳过并打印 `scanned` 提示：
+Run the fast extractor on every PDF. Native-text PDFs produce `.md` immediately; scanned PDFs print `scanned` and are skipped (handled in Step 2).
 
 ```bash
-~/.venvs/paddleocr/bin/python \
-  ~/.cc-switch/skills/pdf-to-md/scripts/pdf_to_md.py \
-  --input "<source_dir_or_file>" \
-  --output "<output_dir>"
+python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
+  --input <source_dir_or_file> \
+  --output <output_dir>
 ```
 
-输出每个文件的状态：
-- `text (avg NNN ch/pg, N images)` — 已提取，结果在 `<output_dir>/<stem>.md`
-- `scanned (avg N ch/pg)` — 跳过，进入 Step 2
+Per-file status output:
+- `text (avg NNN ch/pg, N images)` — extracted, result at `<output_dir>/<stem>.md`
+- `scanned (avg N ch/pg)` — skipped, proceed to Step 2
 
-可选参数：
-- `--large-image-kb 30`：嵌入大图调用 Claude Vision 描述（需 `ANTHROPIC_API_KEY`）
-- `--no-vision`：纯文字模式
-- `--max-images 50`：单文档图片数上限
+Optional flags:
+- `--large-image-kb 30` — send embedded large images to Claude Vision (requires `ANTHROPIC_API_KEY`)
+- `--no-vision` — text-only mode, no API calls
+- `--max-images 50` — per-document image cap
+- `--model claude-haiku-4-5` — Vision model (Haiku is fast/cheap; use `claude-sonnet-4-6` for richer descriptions)
 
-如果只有图片文件（非 PDF），跳过此步直接进 Step 2。
+If the input only contains images (no PDFs), skip this step and go straight to Step 2.
 
-### Step 2：OCR（扫描 PDF + 图片）
+### Step 2 — OCR (scanned PDFs + image files)
 
 ```bash
 export PADDLEOCR_TOKEN="your_token"
 export PADDLEOCR_API_URL="https://xxxx.aistudio-app.com/layout-parsing"
-python3 ~/.cc-switch/skills/pdf-to-md/scripts/ocr_extract.py \
-  "<source_dir>" "<output_dir>"
+python "${CLAUDE_SKILL_DIR}/scripts/ocr_extract.py" \
+  <source_dir> <output_dir>
 ```
 
-OCR 输出结构：
-- `per_page/`：逐页独立 MD（仅云端多页时生成）
-- `merged/`：全文合并 MD，适合直接导入知识库
+Output structure:
+- `per_page/` — one `.md` per page (cloud mode only, multi-page docs)
+- `merged/` — full-document `.md`, ready to drop into a knowledge base
 
-### Step 3：可选审查与调整
+Get PaddleOCR credentials at https://aistudio.baidu.com/paddleocr (free tier available).
 
-如果用户要求调整格式（修正识别错误、统一术语、优化标题层级），先读取 `references/optimization-prompt.md` 中的处理规范，再用 `Edit` 工具针对性修改。
+## Requirements
 
-## 环境
+- Python 3.10+ with `pymupdf` (and `anthropic` if using Vision, `requests` for OCR)
+- `ANTHROPIC_API_KEY` — only when using `--large-image-kb` for inline image descriptions
+- `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL` — only for Step 2 (scanned PDFs and image files)
 
-- `~/.venvs/paddleocr/bin/python`：含 `pymupdf`、可选 `anthropic`、`paddleocr`
-- `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL`：云端 OCR 凭证（仅 Step 2 需要）
-- `ANTHROPIC_API_KEY`：Step 1 中嵌入大图 Vision 描述时需要
+## Notes
 
-## 注意事项
-
-- 原生文字 PDF 走快速路径：无 API 消耗，秒级完成
-- Token 含个人凭证，始终用环境变量传入，不要写在命令行
-- 本地 MLX VLM 模式：`ocr_extract.py` 支持 `--server_url`，详见脚本 `--help`
+- Native-text PDFs cost nothing and finish in seconds — always run Step 1 first.
+- Keep `PADDLEOCR_TOKEN` in environment variables; never pass on the command line.
+- `ocr_extract.py` also supports a local MLX VLM server via `--server_url`; see `--help`.
