@@ -22,6 +22,7 @@ Usage:
 """
 import argparse
 import base64
+import os
 import subprocess
 import sys
 import tempfile
@@ -33,17 +34,14 @@ try:
 except ImportError:
     sys.exit("ERROR: pip install pymupdf")
 
-VISION_PROMPT = (
-    "This is a screenshot of a PPT slide. Describe the slide's full content:\n"
-    "- Title and subtitle (preserve original text)\n"
-    "- Body content (keep the hierarchy, render as Markdown lists)\n"
-    "- If there's a flowchart/architecture diagram: describe each node and "
-    "the connections (arrow direction, hierarchy)\n"
-    "- If there's a chart/data: extract values, axis labels, trends\n"
-    "- If there's a side-by-side layout: describe each part and the comparison\n"
-    "- If there's a table: output it as a complete Markdown table\n"
-    "Output Markdown directly, no preamble."
-)
+VISION_PROMPT = """这是一张PPT幻灯片的截图。请描述幻灯片的完整内容：
+- 标题和副标题（保留原文）
+- 正文内容（保留层级结构，转为 Markdown 列表）
+- 如果有流程图/架构图：描述各节点名称和连接关系（箭头方向、层级）
+- 如果有图表/数据：提取数值、坐标轴标签、趋势
+- 如果有对比布局（左右/上下）：分别描述各部分并说明对比关系
+- 如果有表格：完整输出为 Markdown 表格
+直接输出 Markdown，不要添加引导语。"""
 
 CONVERTIBLE = {".pptx", ".ppsx"}
 
@@ -122,7 +120,7 @@ def convert(
     max_slides: int,
     worker_id: int,
     standalone_client=None,
-    model: str = "claude-haiku-4-5",
+    model: str = "claude-haiku-4-5-20251001",
     concurrent: int = 5,
 ) -> tuple[Path, int]:
     """Returns (output_path, slide_count)."""
@@ -198,8 +196,10 @@ def main():
              "Default: render PNGs and emit ![](...) placeholders for the "
              "calling agent to fill in.",
     )
-    ap.add_argument("--model", default="claude-haiku-4-5",
-                    help="Vision model when --api-key is set")
+    ap.add_argument(
+        "--model", default=os.environ.get("DOCS_TO_WIKI_MODEL", "claude-haiku-4-5-20251001"),
+        help="Vision model when --api-key is set (env: DOCS_TO_WIKI_MODEL)",
+    )
     ap.add_argument("--concurrent", type=int, default=5,
                     help="Parallel Vision calls per file in standalone mode (default: 5)")
     args = ap.parse_args()

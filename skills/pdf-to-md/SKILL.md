@@ -1,96 +1,107 @@
 ---
 name: pdf-to-md
-description: Convert PDF files to structured Markdown. Auto-detects native-text PDFs (extracted instantly with pymupdf, zero API cost) versus scanned/image PDFs (routed through PaddleOCR). Embedded large images are extracted to disk and referenced via standard Markdown image syntax — you (the agent) then describe them using your built-in Vision capability via the Read tool. No separate API key required. Use this skill whenever the user wants to convert a PDF to Markdown, extract text from PDFs, OCR scanned documents, or turn PDF reports into notes — even if they say "PDF → md", "extract this PDF", or "OCR these scans".
+description: 将 PDF 文件批量转换为结构化 Markdown。自动识别原生文字 PDF（pymupdf 直接提取，秒级完成，无需 API Key）和扫描/图像 PDF（PaddleOCR 云端识别）。原生 PDF 中的嵌入大图保存到磁盘，由 Claude agent 用内置 Vision 描述（无需 API Key）。也支持 JPG/PNG/BMP/TIFF/WEBP 图片文件。当用户提到以下任意场景时，务必使用本 Skill：（1）文档转换类："PDF转Markdown"、"扫描PDF"、"图像PDF"、"图片文档"、"OCR提取"、"处理一批PDF"、"文档转Markdown"、"文档转笔记"；（2）PDF内容提取/解析类："读取这个PDF"、"解析PDF"、"提取PDF内容"、"PDF里有什么"、"帮我看看这个PDF"、"从PDF中提取数据"、"分析这份PDF"；（3）用户提供了一个 PDF 文件路径或刚下载了 PDF，并希望获取其中的文字或数据内容。
 ---
 
-# PDF → Markdown
+# PDF / 图片 → Markdown
 
-PDFs route by content type. The script does deterministic extraction; you (the agent) describe any embedded images using your built-in Vision capability.
+## 格式路由
 
-## Routing
+| 输入 | 路径 | 说明 |
+|------|------|------|
+| PDF（原生文字，平均 >50 字符/页） | `pdf_to_md.py` (pymupdf) | 秒级完成，无 API 消耗 |
+| PDF（扫描 / 图像） | `ocr_extract.py` (PaddleOCR 云端) | 自动识别后跳过快速路径 |
+| 图片（JPG / PNG / BMP / TIFF / WEBP） | `ocr_extract.py` | 仅 PaddleOCR 路径 |
 
-| Input | Path | Notes |
-|-------|------|-------|
-| Native-text PDF (avg >50 chars/page) | `pdf_to_md.py` (pymupdf) | Seconds, zero API cost |
-| Scanned / image PDF | `ocr_extract.py` (PaddleOCR) | Auto-skipped from fast path; OCR vendor handles it |
+---
 
-## Workflow (agent mode — default, zero config)
+## Workflow（agent 模式 — 默认，零配置）
 
-### Step 1 — Run the extractor
+### Step 1：原生文字 PDF 快速提取
+
+先对所有 PDF 跑快速提取——原生文字 PDF 直接出结果（嵌入大图保存到磁盘留占位符），扫描 PDF 自动跳过：
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
-  --input <source_dir_or_file> \
-  --output <output_dir>
+~/.venvs/general/bin/python \
+  ~/.cc-switch/skills/pdf-to-md/scripts/pdf_to_md.py \
+  --input "<source_dir_or_file>" \
+  --output "<output_dir>"
 ```
 
-Per-file status:
-- `text (avg NNN ch/pg, N images)` — extracted, result at `<output_dir>/<stem>.md`, images at `<output_dir>/<stem>/imgs/`
-- `scanned (avg N ch/pg)` — skipped, route to Step 3
+输出每个文件的状态：
+- `text (avg NNN ch/pg, N images extracted)` — 已提取，结果在 `<output_dir>/<stem>.md`
+- `scanned (avg N ch/pg)` — 跳过，进入 Step 2
 
-### Step 2 — Fill in image descriptions
+嵌入图片输出：
+- `<output_dir>/<stem>.md` — 正文中图片位置有 `![](...)` 占位符
+- `<output_dir>/<stem>/imgs/img_NNN.{ext}` — 提取的图片（持久保存）
 
-Open the produced `.md`. Each embedded large image appears as a placeholder:
-```markdown
-![](report/imgs/p3_i007.png)
-```
+可选参数：
+- `--large-image-kb 30`：嵌入大图超过此值才提取（过滤小图标）
+- `--no-images`：纯文字模式，跳过所有图片
+- `--max-images 50`：单文档图片数上限
 
-Replace each placeholder with a description block. **Pick one approach based on image count:**
+如果只有图片文件（非 PDF），跳过此步直接进 Step 2。
 
-- **≤5 images total**: use your Read tool to view each image, then Edit the placeholder line to:
-  ```markdown
-  > **[image]**
-  >
-  > <your description: nodes/edges if a diagram, numbers/trends if a chart, table contents if a table>
-  ```
+### Step 1b — 填写图片描述（有嵌入图片时）
 
-- **>5 images, or multiple files at once**: spawn subagents via the Agent tool. Image bytes only enter the subagent's context, not yours. Suggested chunking: 10–20 images per subagent. Prompt each subagent:
-  > "For each image path in this list, Read the image and produce a Markdown description (flowchart → nodes & connections; chart → numbers & trends; table → Markdown table). Return a JSON array of `{path, description}` objects."
-  
-  Then apply the replacements to the `.md` files in your context.
+用 Read tool 读取每张图片，用 Edit tool 将 `![](...)` 替换为完整 Markdown 描述。
 
-### Step 3 — OCR (scanned PDFs only)
+- **≤ 5 张**：直接用 Read tool 逐张读取，Edit 替换占位符
+- **> 5 张**：spawn subagents（每个 10–20 张），图片字节只进 subagent 上下文
 
-For PDFs that printed `scanned` in Step 1:
+### Step 2：OCR（扫描 PDF + 图片）
+
+> `ocr_extract.py` 与 `pdf_to_md.py` 是两个独立脚本，接口不同：
+> `ocr_extract.py` 使用**位置参数**（无 `--input/--output` 标志）。
 
 ```bash
 export PADDLEOCR_TOKEN="your_token"
 export PADDLEOCR_API_URL="https://xxxx.aistudio-app.com/layout-parsing"
-python "${CLAUDE_SKILL_DIR}/scripts/ocr_extract.py" \
-  <source_dir> <output_dir>
+python3 ~/.cc-switch/skills/pdf-to-md/scripts/ocr_extract.py \
+  "<source_dir>" "<output_dir>"
 ```
 
-Get free PaddleOCR credentials at https://aistudio.baidu.com/paddleocr.
+OCR 输出结构：
+- `per_page/`：逐页独立 MD（仅云端多页时生成）
+- `merged/`：全文合并 MD，适合直接导入知识库
 
-## Standalone mode (backend / cron)
+### Step 3：可选审查与调整
 
-For headless automation outside Claude Code, pass `--api-key` to have the script call Vision itself:
+如果用户要求调整格式（修正识别错误、统一术语、优化标题层级），先读取 `references/optimization-prompt.md` 中的处理规范，再用 `Edit` 工具针对性修改。
+
+## Standalone 模式（后台 / cron）
+
+在 Claude Code 之外做无人值守批处理时，传 `--api-key` 让脚本自行调用 Vision API 描述嵌入图片：
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/pdf_to_md.py" \
-  --input docs/ --output out/ \
-  --api-key sk-ant-... --model claude-haiku-4-5
+~/.venvs/paddleocr/bin/python \
+  ~/.cc-switch/skills/pdf-to-md/scripts/pdf_to_md.py \
+  --input file.pdf --output out/ \
+  --api-key sk-ant-... \
+  --model claude-haiku-4-5-20251001
 ```
 
-## Flags
+也可通过环境变量统一设置模型：
 
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--large-image-kb` | `30` | Only extract/describe images larger than this (KB). 30 KB filters out logos/icons. |
-| `--max-images` | `50` | Per-document image cap (cost guard). |
-| `--no-images` | — | Skip image extraction entirely (text-only output). |
-| `--api-key` | — | Standalone mode (script calls Vision). Default is agent mode. |
-| `--model` | `claude-haiku-4-5` | Vision model when `--api-key` is set. |
+```bash
+export DOCS_TO_WIKI_MODEL=claude-sonnet-4-6
+```
 
-## Requirements
+询问用户选择模型（standalone 模式下）：
 
-- Python 3.10+ with `pymupdf`
-- For Step 3 (scanned PDFs): `requests` + `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL`
-- For `--api-key` standalone mode only: `pip install anthropic`
+> 请问要用哪个 Claude 模型进行 Vision 处理？直接回车使用默认（`claude-haiku-4-5-20251001`）。
 
-## Notes
+## 环境
 
-- Native-text PDFs cost nothing and finish in seconds — always run Step 1 first.
-- Image placeholders use standard Markdown syntax, so they render in Obsidian / GitHub / any viewer even before you describe them.
-- Keep `PADDLEOCR_TOKEN` in environment variables; never pass on the command line.
-- `ocr_extract.py` also supports a local MLX VLM server via `--server_url`; see `--help`.
+- `~/.venvs/general/bin/python`：含 `pymupdf`
+- `PADDLEOCR_TOKEN` / `PADDLEOCR_API_URL`：云端 OCR 凭证（仅 Step 2 需要）
+- `anthropic` 包 + `ANTHROPIC_API_KEY`：仅 standalone 模式（`--api-key`）需要
+- `DOCS_TO_WIKI_MODEL`（可选）：standalone 模式统一覆盖模型，例如 `export DOCS_TO_WIKI_MODEL=claude-sonnet-4-6`
+
+## 注意事项
+
+- 原生文字 PDF 走快速路径：无 API 消耗，秒级完成
+- Token 含个人凭证，始终用环境变量传入，不要写在命令行
+- 图片文件持久保存在 `<stem>/imgs/`，agent 可在任意时间点 Read
+- 本地 MLX VLM 模式：`ocr_extract.py` 支持 `--server_url`，详见脚本 `--help`

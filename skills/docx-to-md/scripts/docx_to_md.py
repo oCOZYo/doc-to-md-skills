@@ -35,13 +35,12 @@ except ImportError:
     sys.exit("ERROR: pip install python-docx")
 
 VISION_PROMPT = (
-    "Describe this image completely. "
-    "If it is a flowchart or architecture diagram, describe each node and "
-    "the connections between them (arrow direction, flow order). "
-    "If it is a chart or data table, extract key numbers, axis labels, and trends. "
-    "If it is a UI screenshot, describe the key regions and the data shown. "
-    "If it is a side-by-side comparison, explain what each side represents and the differences. "
-    "Output Markdown directly, no preamble or trailing remarks."
+    "请描述这张图片的完整内容。"
+    "如果是流程图或架构图，描述各节点名称和它们之间的连接关系（箭头方向、流程顺序）；"
+    "如果是图表或数据表，提取关键数字、坐标轴标签和趋势；"
+    "如果是界面截图，描述关键功能区域和显示的数据；"
+    "如果是对比图，说明左右/上下各自代表什么及其差异。"
+    "直接输出 Markdown 格式内容，不要添加前言或后记。"
 )
 
 # Bytes that identify raster image formats
@@ -149,7 +148,7 @@ def convert(
     large_image_kb: int,
     max_images: int,
     standalone_client=None,
-    model: str = "claude-haiku-4-5",
+    model: str = "claude-haiku-4-5-20251001",
 ) -> tuple[Path, int]:
     """
     Returns (output_path, image_count).
@@ -183,9 +182,9 @@ def convert(
                     if standalone_client is not None:
                         try:
                             description = call_vision(blob, media_type, model, standalone_client)
-                            lines.append(f"\n> **[image]**\n>\n> {description}\n")
+                            lines.append(f"\n> **[图片]**\n>\n> {description}\n")
                         except Exception as e:
-                            lines.append(f"\n> *[image vision failed: {e}]*\n")
+                            lines.append(f"\n> *[图片处理失败: {e}]*\n")
                     else:
                         imgs_dir.mkdir(parents=True, exist_ok=True)
                         img_name = f"img_{images_processed:03d}.{ext}"
@@ -193,8 +192,8 @@ def convert(
                         lines.append(f"\n![]({stem}/imgs/{img_name})\n")
                     if images_processed >= max_images:
                         lines.append(
-                            f"\n> *(reached per-document image cap {max_images}; "
-                            "remaining images skipped)*\n"
+                            f"\n> *（达到单文档最大图片处理数 {max_images}，"
+                            "后续图片已跳过）*\n"
                         )
 
             text = para_to_md(block)
@@ -241,8 +240,8 @@ def main():
     )
     ap.add_argument(
         "--model",
-        default="claude-haiku-4-5",
-        help="Vision model when --api-key is set",
+        default=os.environ.get("DOCS_TO_WIKI_MODEL", "claude-haiku-4-5-20251001"),
+        help="Vision model when --api-key is set (env: DOCS_TO_WIKI_MODEL)",
     )
     args = ap.parse_args()
 
